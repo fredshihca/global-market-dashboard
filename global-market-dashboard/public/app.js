@@ -1,11 +1,57 @@
-const $ = id => document.getElementById(id);
-function time(value) {
-  if (!value) return '時間未提供';
+'use strict';
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+// Global Market Dashboard - frontend
+// Compatible with the revised server.js.
+
+const $ = id => document.getElementById(id);
+
+const validNumber = value => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+const validPrice = value => {
+  const n = validNumber(value);
+  return n !== null && n > 0;
+};
+
+const fmt = (value, digits = 2) => {
+  const n = validNumber(value);
+  if (n === null) return '—';
+  return new Intl.NumberFormat('zh-TW', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  }).format(n);
+};
+
+const priceFmt = (value, digits = 2) =>
+  validPrice(value) ? fmt(value, digits) : '—';
+
+const pctFmt = value => {
+  const n = validNumber(value);
+  return n === null
+    ? '—'
+    : (n > 0 ? '+' : '') + fmt(n) + '%';
+};
+
+const esc = value =>
+  String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+
+function time(value) {
+  if (value === null || value === undefined || value === '') {
     return '時間未提供';
   }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '時間未提供';
 
   return date.toLocaleString('zh-TW', {
     timeZone: 'Asia/Taipei',
@@ -18,81 +64,545 @@ function time(value) {
     hour12: false
   });
 }
-const validPrice = v =>
-  v !== null &&
-  v !== undefined &&
-  v !== '' &&
-  Number.isFinite(Number(v)) &&
-  Number(v) > 0;
 
-const fmt = (v, d = 2) =>
-  validPrice(v)
-    ? new Intl.NumberFormat('zh-TW', {
-        minimumFractionDigits: d,
-        maximumFractionDigits: d
-      }).format(Number(v))
-    : '—';
+function quoteSource(q) {
+  if (!q || !q.source || q.source === 'Unavailable') {
+    return '資料來源未提供';
+  }
+  if (q.dataType === 'delayed_daily') {
+    return 'Stooq 歷史日線（延遲）';
+  }
+  return q.source;
+}
+
 function quoteStatus(q, after = false) {
   if (!q || q.status !== 'ok') {
     return '暫無可用行情';
   }
-
   if (after && !validPrice(q.after)) {
     return '尚無可靠延長時段報價';
   }
-
   if (!validPrice(q.price)) {
     return '報價缺失';
   }
-
   if (q.dataType === 'delayed_daily') {
-    return '歷史日線收盤價（非即時）';
+    return '歷史日線收盤價，非即時';
+  }
+  return '行情可能延遲';
+}
+
+let quotes = [];
+let tab = 'marginListed';
+let quotesLoading = false;
+let economyLoading = false;
+let flowsLoading = false;
+
+const quoteMap = () =>
+  new Map(quotes.map(q => [q.symbol, q]));
+
+function spark(points) {
+  const usable = (Array.isArray(points) ? points : [])
+    .filter(p => p && validPrice(p.v));
+
+  if (usable.length < 2) {
+    return '<div class="spark muted">暫無走勢資料</div>';
   }
 
-  return '行情資料可能延遲';
+  const sampled = usable.length > 100
+    ? usable.filter((_, i) =>
+        i % Math.ceil(usable.length / 100) === 0
+      )
+    : usable;
+
+  const vals = sampled.map(p => Number(p.v));
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const range = max - min || 1;
+
+  const coords = vals.map((v, i) => {
+    const x = i / (vals.length - 1) * 300;
+    const y = 45 - (v - min) / range * 37;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+
+  const color = vals.at(-1) >= vals[0]
+    ? '#39d6a4'
+    : '#f7778b';
+
+  return `<svg class="spark"
+    viewBox="0 0 300 52"
+    preserveAspectRatio="none"
+    role="img"
+    aria-label="歷史價格走勢">
+    <polyline fill="none"
+      stroke="${color}"
+      stroke-width="2.5"
+      points="${coords}"/>
+  </svg>`;
 }
 
-function quoteSource(q) {
-  if (!q?.source) return '資料來源未提供';
-  return q.source;
+function card(q, after = false) {
+  const available = q?.status === 'ok';
+  const val = after ? q?.after : q?.price;
+  const hasValue = available && validPrice(val);
+
+  let delta = null;
+
+  if (hasValue) {
+    if (after) {
+      if (validPrice(q.price)) {
+        delta = (Number(val) - Number(q.price)) /
+          Number(q.price) * 100;
+      }
+    } else {
+      delta = validNumber(q.change);
+    }
+  }
+
+  const cls = delta === null
+    ? 'muted'
+    : delta > 0 ? 'up' : delta < 0 ? 'down' : 'muted';
+
+  const displayName = esc(q?.name || '暫無資料');
+  const symbol = esc(q?.symbol || '');
+  const currency = esc(q?.currency || '');
+  const source = esc(quoteSource(q));
+  const status = esc(quoteStatus(q, after));
+
+  const quoteTime = after
+    ? q?.afterTime
+    : q?.exchangeTime;
+
+  const timeLabel = q?.dataType === 'delayed_daily'
+    ? '歷史交易日期'
+    : after ? '延長交易報價時間' : '報價時間';
+
+  let extra = '';
+
+  if (after) {
+    extra = `<div class="extra">
+      ETF 延長交易參考，不等同指數盤後價
+    </div>`;
+  } else if (q?.market === 'US') {
+    extra = `<div class="extra">
+      延長時段：${priceFmt(q.after)}
+      ${validPrice(q.after) ? '' : '（尚無可靠資料）'}
+    </div>`;
+  }
+
+  const warning = q?.dataType === 'delayed_daily'
+    ? `<div class="extra" style="color:#ffcb77">
+        ⚠ 歷史日線收盤價，非即時行情
+      </div>`
+    : '';
+
+  const statusLine = !hasValue
+    ? `<div class="extra muted">${status}</div>`
+    : '';
+
+  const chart = after
+    ? ''
+    : spark(q?.points);
+
+  return `<article class="tile">
+    <div class="top">
+      <span class="name">${displayName}</span>
+      <span class="symbol">${symbol}</span>
+    </div>
+
+    <div class="price">${hasValue ? priceFmt(val) : '—'}</div>
+
+    <div class="delta ${cls}">
+      ${hasValue ? pctFmt(delta) : '無可用報價'}
+    </div>
+
+    ${chart}
+    ${extra}
+    ${warning}
+    ${statusLine}
+
+    <div class="meta">
+      ${currency ? currency + ' · ' : ''}${esc(timeLabel)}：
+      ${time(quoteTime)}
+      <br>
+      來源：${source}
+      <br>
+      ${status}
+    </div>
+  </article>`;
 }
-const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;'
-}[ch]));
-let tab = 'marginListed';
-function spark(points){if(!points?.length)return '<div class="spark muted">暫無走勢資料</div>';const vals=points.map(p=>p.v),mn=Math.min(...vals),mx=Math.max(...vals),range=mx-mn||1;const coords=vals.map((v,i)=>`${(i/(vals.length-1||1)*300).toFixed(1)},${(45-(v-mn)/range*37).toFixed(1)}`).join(' ');return `<svg class="spark" viewBox="0 0 300 52" preserveAspectRatio="none"><polyline fill="none" stroke="${vals.at(-1)>=vals[0]?'#39d6a4':'#f7778b'}" stroke-width="2.5" points="${coords}"/></svg>`}
-function card(q,after=false){const available=q?.status==='ok';const val = after
-  ? (validPrice(q?.after) ? q.after : null)
-  : (validPrice(q?.price) ? q.price : null);const delta=after&&Number.isFinite(val)&&Number.isFinite(q.price)&&q.price?100*(val-q.price)/q.price:q?.change;const cls=delta>0?'up':delta<0?'down':'muted';return `<article class="tile"><div class="top"><span class="name">${esc(q?.name||'—')}</span><span class="symbol">${esc(q?.symbol||'')}</span></div><div class="price">${fmt(val)}</div><div class="delta ${cls}">${Number.isFinite(delta)?(delta>0?'+':'')+fmt(delta)+'%':'無可用報價'}</div>${!after?spark(q?.points):'<div class="extra">延長時段參考，不等同指數盤後價</div>'}<div class="meta">${available?esc(q.currency)+' · '+time(q.exchangeTime):'資料源暫時無法取得'}<br>${after?'盤後／延長交易時段': '來源：'+esc(q?.source||'未取得')}</div>${q?.dataType==='delayed_daily'?'<div class="extra" style="color:#ffcb77">⚠ 歷史日線收盤價，非即時</div>':''}${!after&&q?.market!=='FX'?`<div class="extra">盤後：${q?.market==='US'?fmt(q.after):'不適用／無可靠資料'}</div>`:''}</article>`}
-function render(){const by=s=>quotes.find(q=>q.symbol===s);$('summary').innerHTML=['^DJI','^IXIC','^TWII','MU'].map(s=>card(by(s))).join('');$('usCards').innerHTML=['^DJI','^IXIC','^SOX','^GSPC'].map(s=>card(by(s))).join('');$('afterCards').innerHTML=['DIA','QQQ','SOXX','SPY'].map(s=>card(by(s),true)).join('');$('twCards').innerHTML=['TWD=X','^TWII','^TWOII','TX=F'].map(s=>card(by(s))).join('');const term=$('search').value.trim().toLowerCase();$('chipCards').innerHTML=['MU','NVDA','000660.KS','009150.KS','3110.T','4062.T'].map(by).filter(q=>q&&(q.name.toLowerCase().includes(term)||q.symbol.toLowerCase().includes(term))).map(q=>card(q)).join('')||'<p class="hint">找不到符合的股票</p>'}
-async function loadQuotes(){
- const notice=$('notice');
- notice.textContent='正在連線行情服務，請稍候（最多約25秒）…';
- const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),25000);
- try{
-  const r=await fetch('/api/quotes',{signal:ctrl.signal,cache:'no-store'});
-  if(!r.ok)throw Error('行情 API HTTP '+r.status);
-  const d=await r.json();if(!Array.isArray(d.items))throw Error('API 資料格式錯誤');
-  quotes=d.items;const ok=quotes.filter(x=>x.status==='ok').length;
-  $('lastUpdated').textContent='更新：'+time(d.updatedAt);
-  notice.textContent='成功取得 '+ok+'/'+quotes.length+' 項行情；其他項目請參考資料來源及狀態。';
-  render();
- }catch(e){
-  notice.textContent='完整行情暫時無法載入（'+(e.name==='AbortError'?'超過25秒':e.message)+'），正在嘗試顯示診斷行情…';
-  try{
-   const r=await fetch('/api/diagnostics',{cache:'no-store'});if(!r.ok)throw Error('診斷 API HTTP '+r.status);
-   const d=await r.json();
-   const samples=(d.results||[]).filter(x=>x.hasPrice&&Number.isFinite(x.price));
-   if(samples.length){quotes=samples.map(x=>({...x,status:'ok',market:'US',change:null,after:null,points:[]}));render();notice.textContent='目前僅顯示 '+samples.length+' 項診斷行情；完整行情查詢失敗，請查看 Render Logs。';}
-   else notice.textContent='行情無法載入，診斷資料也未提供可顯示的價格。請查看 /api/diagnostics 與 Render Logs。';
-  }catch(err){notice.textContent='行情與診斷服務皆無法載入：'+err.message+'。請查看 Render Logs。';}
- }finally{clearTimeout(timer)}
+
+function render() {
+  const by = quoteMap();
+  const get = symbol => by.get(symbol) || {
+    symbol,
+    name: symbol,
+    status: 'unavailable'
+  };
+
+  const sections = [
+    ['summary', ['^DJI', '^IXIC', '^TWII', 'MU'], false],
+    ['usCards', ['^DJI', '^IXIC', '^SOX', '^GSPC'], false],
+    ['afterCards', ['DIA', 'QQQ', 'SOXX', 'SPY'], true],
+    ['twCards', ['TWD=X', '^TWII', '^TWOII', 'TX=F'], false]
+  ];
+
+  for (const [id, symbols, after] of sections) {
+    const element = $(id);
+    if (!element) continue;
+    element.innerHTML = symbols
+      .map(symbol => card(get(symbol), after))
+      .join('');
+  }
+
+  const search = $('search')?.value.trim().toLowerCase() || '';
+  const semiconductorSymbols = [
+    'MU', 'NVDA', '000660.KS',
+    '009150.KS', '3110.T', '4062.T'
+  ];
+
+  const semiconductor = semiconductorSymbols
+    .map(get)
+    .filter(q =>
+      q.name.toLowerCase().includes(search) ||
+      q.symbol.toLowerCase().includes(search)
+    );
+
+  if ($('chipCards')) {
+    $('chipCards').innerHTML = semiconductor.length
+      ? semiconductor.map(q => card(q)).join('')
+      : '<p class="hint">找不到符合的股票</p>';
+  }
 }
-async function loadEconomy(){try{const r=await fetch('/api/economy');if(!r.ok)throw Error('資料源未回應');const d=await r.json();$('macroCards').innerHTML=['cpi','ppi'].map(k=>{const x=d.data[k],latest=x.series?.[0],prev=x.series?.[1],year=x.series?.find(y=>y.year===String(Number(latest?.year)-1)&&y.period===latest?.period);const yoy=latest&&year?(Number(latest.value)/Number(year.value)-1)*100:null;return `<div class="tile"><div class="name">${k.toUpperCase()} ${k==='cpi'?'消費者物價指數':'生產者物價指數'}</div><div class="price">${fmt(Number(latest?.value),3)}</div><div class="delta muted">${latest?latest.year+' / '+latest.periodName:'無資料'}</div><div class="extra">年增率（依指數計算）：${fmt(yoy)}%</div><div class="meta">上期指數：${esc(prev?.value||'—')}<br>來源：BLS 官方公開 API；預測值未提供</div></div>`}).join('')}catch(e){$('macroCards').innerHTML='<div class="tile muted">BLS 指標暫無資料：'+esc(e.message)+'</div>'}}
-function flatten(data){if(!data||typeof data!=='object')return null;if(Array.isArray(data.tables)){const t=data.tables.find(x=>Array.isArray(x.data)&&x.data.length);if(t)return {fields:t.fields||[],rows:t.data}}if(Array.isArray(data.data)&&data.data.length)return {fields:data.fields||[],rows:data.data};if(Array.isArray(data.aaData)&&data.aaData.length)return {fields:data.fields||[],rows:data.aaData};return null}
-async function loadFlows(){const chosen=tab;$('flowStatus').textContent='正在取得官方公開資料…';$('flowTable').innerHTML='';try{const r=await fetch('/api/taiwan/'+tab);const d=await r.json();if(chosen!==tab)return;if(!r.ok)throw Error(d.error||'無法連線');const t=flatten(d.data);if(!t){$('flowStatus').textContent='官方端點已回應，但格式不符合目前解析器；請檢查來源與日期。';return}$('flowStatus').textContent='官方原始資料（欄位定義以交易所為準），顯示前100筆 · '+d.source;const cols=t.fields.length?t.fields:t.rows[0].map((_,i)=>'欄位 '+(i+1));$('flowTable').innerHTML='<table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+t.rows.slice(0,100).map(row=>'<tr>'+row.map(c=>'<td>'+esc(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}catch(e){if(chosen===tab)$('flowStatus').textContent='目前無法取得此項官方資料：'+e.message}}
-$('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(!b)return;tab=b.dataset.tab;document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));loadFlows()});$('search').addEventListener('input',render);$('refresh').onclick=()=>{loadQuotes();loadEconomy();loadFlows()};function tick(){$('clock').textContent=new Date().toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false})+' 台灣時間'}tick();setInterval(tick,1000);loadQuotes();loadEconomy();loadFlows();setInterval(loadQuotes,60000);setInterval(loadFlows,300000);setInterval(loadEconomy,21600000);
+
+async function fetchJSON(url, timeout = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    if (!response.ok) {
+      throw Error('HTTP ' + response.status);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function loadQuotes() {
+  if (quotesLoading) return;
+  quotesLoading = true;
+
+  const notice = $('notice');
+  if (notice) notice.textContent = '正在更新行情…';
+
+  try {
+    const data = await fetchJSON('/api/quotes', 35000);
+
+    if (!Array.isArray(data.items)) {
+      throw Error('行情 API 格式不正確');
+    }
+
+    quotes = data.items;
+
+    const valid = quotes.filter(q =>
+      q.status === 'ok' && validPrice(q.price)
+    ).length;
+
+    const delayed = quotes.filter(q =>
+      q.dataType === 'delayed_daily'
+    ).length;
+
+    const unavailable = quotes.length - valid;
+
+    if ($('lastUpdated')) {
+      $('lastUpdated').textContent =
+        '伺服器更新：' + time(data.updatedAt);
+    }
+
+    if (notice) {
+      notice.textContent =
+        `已取得 ${valid}/${quotes.length} 項有效行情` +
+        (delayed ? `，其中 ${delayed} 項為歷史日線` : '') +
+        (unavailable ? `，${unavailable} 項暫無可靠報價` : '') +
+        '。報價可能延遲，請以來源及時間為準。';
+    }
+
+    render();
+
+  } catch (error) {
+    if (notice) {
+      notice.textContent =
+        '行情更新失敗：' +
+        (error.name === 'AbortError'
+          ? '連線逾時'
+          : error.message) +
+        '。保留上次成功取得的資料。';
+    }
+
+    // Do not manufacture quote prices from diagnostics.
+    // Diagnostics only reports availability, not usable prices.
+    if (!quotes.length) {
+      render();
+    }
+
+  } finally {
+    quotesLoading = false;
+  }
+}
+
+function calculateYoY(latest, previousYear) {
+  const current = validNumber(latest?.value);
+  const prior = validNumber(previousYear?.value);
+
+  if (current === null || prior === null || prior === 0) {
+    return null;
+  }
+
+  return (current / prior - 1) * 100;
+}
+
+async function loadEconomy() {
+  if (economyLoading) return;
+  economyLoading = true;
+
+  try {
+    const response = await fetchJSON('/api/economy', 30000);
+
+    if (response.status !== 'ok' || !response.data) {
+      throw Error('BLS 暫無可用資料');
+    }
+
+    const html = ['cpi', 'ppi'].map(key => {
+      const item = response.data[key];
+      const series = Array.isArray(item?.series)
+        ? item.series
+        : [];
+
+      const latest = series[0];
+      const previous = series[1];
+
+      const previousYear = latest
+        ? series.find(row =>
+            Number(row.year) === Number(latest.year) - 1 &&
+            row.period === latest.period
+          )
+        : null;
+
+      const yoy = calculateYoY(latest, previousYear);
+
+      const title = key === 'cpi'
+        ? '消費者物價指數'
+        : '生產者物價指數';
+
+      return `<div class="tile">
+        <div class="name">${key.toUpperCase()} ${title}</div>
+        <div class="price">${priceFmt(latest?.value, 3)}</div>
+        <div class="delta muted">
+          ${latest
+            ? esc(latest.year + ' / ' + latest.periodName)
+            : '無資料'}
+        </div>
+        <div class="extra">
+          年增率：${yoy === null ? '—' : pctFmt(yoy)}
+        </div>
+        <div class="meta">
+          上期指數：${priceFmt(previous?.value, 3)}
+          <br>
+          來源：美國勞工統計局 BLS
+          <br>
+          官方歷史數據，非市場預測
+        </div>
+      </div>`;
+    }).join('');
+
+    if ($('macroCards')) $('macroCards').innerHTML = html;
+
+  } catch (error) {
+    if ($('macroCards')) {
+      $('macroCards').innerHTML =
+        `<div class="tile muted">
+          CPI／PPI 暫無可用資料：${esc(error.message)}
+        </div>`;
+    }
+  } finally {
+    economyLoading = false;
+  }
+}
+
+function flatten(data) {
+  if (!data || typeof data !== 'object') return null;
+
+  if (Array.isArray(data.tables)) {
+    const table = data.tables.find(item =>
+      Array.isArray(item.data) && item.data.length
+    );
+    if (table) {
+      return {
+        fields: table.fields || [],
+        rows: table.data
+      };
+    }
+  }
+
+  if (Array.isArray(data.data) && data.data.length) {
+    return {
+      fields: data.fields || [],
+      rows: data.data
+    };
+  }
+
+  if (Array.isArray(data.aaData) && data.aaData.length) {
+    return {
+      fields: data.fields || [],
+      rows: data.aaData
+    };
+  }
+
+  // Some OTC endpoints use nested objects.
+  if (data.data && typeof data.data === 'object') {
+    return flatten(data.data);
+  }
+
+  return null;
+}
+
+async function loadFlows() {
+  if (flowsLoading) return;
+  flowsLoading = true;
+
+  const chosen = tab;
+  const status = $('flowStatus');
+  const tableElement = $('flowTable');
+
+  if (status) status.textContent = '正在取得官方公開資料…';
+  if (tableElement) tableElement.innerHTML = '';
+
+  try {
+    const response = await fetchJSON(
+      '/api/taiwan/' + encodeURIComponent(chosen),
+      30000
+    );
+
+    if (chosen !== tab) return;
+
+    if (response.status !== 'ok') {
+      throw Error(response.error || '資料來源未回應');
+    }
+
+    const table = flatten(response.data);
+
+    if (!table || !table.rows.length) {
+      if (status) {
+        status.textContent =
+          '官方端點已回應，但目前沒有可解析的表格。' +
+          '可能是非交易日或資料格式已更新。';
+      }
+      return;
+    }
+
+    const rows = table.rows
+      .filter(Array.isArray)
+      .slice(0, 100);
+
+    if (!rows.length) {
+      if (status) status.textContent = '目前無可顯示的資料列';
+      return;
+    }
+
+    const fields = table.fields.length
+      ? table.fields
+      : rows[0].map((_, index) => '欄位 ' + (index + 1));
+
+    const header = fields.map(field =>
+      `<th>${esc(field)}</th>`
+    ).join('');
+
+    const body = rows.map(row =>
+      '<tr>' +
+      row.map(value => `<td>${esc(value)}</td>`).join('') +
+      '</tr>'
+    ).join('');
+
+    if (tableElement) {
+      tableElement.innerHTML =
+        `<table>
+          <thead><tr>${header}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+
+    if (status) {
+      status.textContent =
+        '官方原始資料 · 顯示前 ' + rows.length +
+        ' 筆 · 來源：' + response.source +
+        ' · API 擷取：' + time(response.updatedAt);
+    }
+
+  } catch (error) {
+    if (chosen === tab && status) {
+      status.textContent =
+        '目前無法取得官方資料：' + error.message;
+    }
+  } finally {
+    flowsLoading = false;
+    // If the user changed tabs during loading, fetch the new tab.
+    if (chosen !== tab) loadFlows();
+  }
+}
+
+function tick() {
+  const clock = $('clock');
+  if (!clock) return;
+
+  clock.textContent = new Date().toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei',
+    hour12: false
+  }) + ' 台灣時間';
+}
+
+function initialize() {
+  $('tabs')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-tab]');
+    if (!button) return;
+
+    tab = button.dataset.tab;
+
+    document.querySelectorAll('[data-tab]').forEach(element => {
+      element.classList.toggle('active', element === button);
+    });
+
+    loadFlows();
+  });
+
+  $('search')?.addEventListener('input', render);
+
+  if ($('refresh')) {
+    $('refresh').onclick = () => {
+      loadQuotes();
+      loadEconomy();
+      loadFlows();
+    };
+  }
+
+  tick();
+  setInterval(tick, 1000);
+
+  loadQuotes();
+  loadEconomy();
+  loadFlows();
+
+  setInterval(loadQuotes, 60000);
+  setInterval(loadFlows, 300000);
+  setInterval(loadEconomy, 21600000);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initialize);
+} else {
+  initialize();
+}
