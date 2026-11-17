@@ -18,13 +18,44 @@ function time(value) {
     hour12: false
   });
 }
+const validPrice = v =>
+  v !== null &&
+  v !== undefined &&
+  v !== '' &&
+  Number.isFinite(Number(v)) &&
+  Number(v) > 0;
+
 const fmt = (v, d = 2) =>
-  Number.isFinite(Number(v))
+  validPrice(v)
     ? new Intl.NumberFormat('zh-TW', {
-        maximumFractionDigits: d,
-        minimumFractionDigits: d
+        minimumFractionDigits: d,
+        maximumFractionDigits: d
       }).format(Number(v))
     : '—';
+function quoteStatus(q, after = false) {
+  if (!q || q.status !== 'ok') {
+    return '暫無可用行情';
+  }
+
+  if (after && !validPrice(q.after)) {
+    return '尚無可靠延長時段報價';
+  }
+
+  if (!validPrice(q.price)) {
+    return '報價缺失';
+  }
+
+  if (q.dataType === 'delayed_daily') {
+    return '歷史日線收盤價（非即時）';
+  }
+
+  return '行情資料可能延遲';
+}
+
+function quoteSource(q) {
+  if (!q?.source) return '資料來源未提供';
+  return q.source;
+}
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
   '&': '&amp;',
   '<': '&lt;',
@@ -34,7 +65,9 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
 }[ch]));
 let tab = 'marginListed';
 function spark(points){if(!points?.length)return '<div class="spark muted">暫無走勢資料</div>';const vals=points.map(p=>p.v),mn=Math.min(...vals),mx=Math.max(...vals),range=mx-mn||1;const coords=vals.map((v,i)=>`${(i/(vals.length-1||1)*300).toFixed(1)},${(45-(v-mn)/range*37).toFixed(1)}`).join(' ');return `<svg class="spark" viewBox="0 0 300 52" preserveAspectRatio="none"><polyline fill="none" stroke="${vals.at(-1)>=vals[0]?'#39d6a4':'#f7778b'}" stroke-width="2.5" points="${coords}"/></svg>`}
-function card(q,after=false){const available=q?.status==='ok';const val=after?q?.after:q?.price;const delta=after&&Number.isFinite(val)&&Number.isFinite(q.price)&&q.price?100*(val-q.price)/q.price:q?.change;const cls=delta>0?'up':delta<0?'down':'muted';return `<article class="tile"><div class="top"><span class="name">${esc(q?.name||'—')}</span><span class="symbol">${esc(q?.symbol||'')}</span></div><div class="price">${fmt(val)}</div><div class="delta ${cls}">${Number.isFinite(delta)?(delta>0?'+':'')+fmt(delta)+'%':'無可用報價'}</div>${!after?spark(q?.points):'<div class="extra">延長時段參考，不等同指數盤後價</div>'}<div class="meta">${available?esc(q.currency)+' · '+time(q.exchangeTime):'資料源暫時無法取得'}<br>${after?'盤後／延長交易時段': '來源：'+esc(q?.source||'未取得')}</div>${q?.dataType==='delayed_daily'?'<div class="extra" style="color:#ffcb77">⚠ 歷史日線收盤價，非即時</div>':''}${!after&&q?.market!=='FX'?`<div class="extra">盤後：${q?.market==='US'?fmt(q.after):'不適用／無可靠資料'}</div>`:''}</article>`}
+function card(q,after=false){const available=q?.status==='ok';const val = after
+  ? (validPrice(q?.after) ? q.after : null)
+  : (validPrice(q?.price) ? q.price : null);const delta=after&&Number.isFinite(val)&&Number.isFinite(q.price)&&q.price?100*(val-q.price)/q.price:q?.change;const cls=delta>0?'up':delta<0?'down':'muted';return `<article class="tile"><div class="top"><span class="name">${esc(q?.name||'—')}</span><span class="symbol">${esc(q?.symbol||'')}</span></div><div class="price">${fmt(val)}</div><div class="delta ${cls}">${Number.isFinite(delta)?(delta>0?'+':'')+fmt(delta)+'%':'無可用報價'}</div>${!after?spark(q?.points):'<div class="extra">延長時段參考，不等同指數盤後價</div>'}<div class="meta">${available?esc(q.currency)+' · '+time(q.exchangeTime):'資料源暫時無法取得'}<br>${after?'盤後／延長交易時段': '來源：'+esc(q?.source||'未取得')}</div>${q?.dataType==='delayed_daily'?'<div class="extra" style="color:#ffcb77">⚠ 歷史日線收盤價，非即時</div>':''}${!after&&q?.market!=='FX'?`<div class="extra">盤後：${q?.market==='US'?fmt(q.after):'不適用／無可靠資料'}</div>`:''}</article>`}
 function render(){const by=s=>quotes.find(q=>q.symbol===s);$('summary').innerHTML=['^DJI','^IXIC','^TWII','MU'].map(s=>card(by(s))).join('');$('usCards').innerHTML=['^DJI','^IXIC','^SOX','^GSPC'].map(s=>card(by(s))).join('');$('afterCards').innerHTML=['DIA','QQQ','SOXX','SPY'].map(s=>card(by(s),true)).join('');$('twCards').innerHTML=['TWD=X','^TWII','^TWOII','TX=F'].map(s=>card(by(s))).join('');const term=$('search').value.trim().toLowerCase();$('chipCards').innerHTML=['MU','NVDA','000660.KS','009150.KS','3110.T','4062.T'].map(by).filter(q=>q&&(q.name.toLowerCase().includes(term)||q.symbol.toLowerCase().includes(term))).map(q=>card(q)).join('')||'<p class="hint">找不到符合的股票</p>'}
 async function loadQuotes(){
  const notice=$('notice');
