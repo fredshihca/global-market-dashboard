@@ -1,4 +1,23 @@
 const $ = id => document.getElementById(id);
+function time(value) {
+  if (!value) return '時間未提供';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '時間未提供';
+  }
+
+  return date.toLocaleString('zh-TW', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
 const fmt = (v, d = 2) =>
   Number.isFinite(Number(v))
     ? new Intl.NumberFormat('zh-TW', {
