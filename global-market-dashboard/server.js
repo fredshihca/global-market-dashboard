@@ -1,5 +1,3 @@
-一步：複製完整程式碼
-
 import express from 'express';
 
 const app = express();
@@ -168,50 +166,33 @@ function yahooQuote(result, name, symbol, market) {
   const price = positive(meta.regularMarketPrice);
   if (price === null) throw Error('Yahoo returned no valid price');
 
-  const previous = positive(
-    meta.chartPreviousClose ?? meta.previousClose
-  );
+  const previous = positive(meta.chartPreviousClose) ??
+    positive(meta.previousClose);
 
   const points = timestamps.map((timestamp, index) => ({
     t: timestamp * 1000,
     v: positive(closes[index])
   })).filter(point => point.v !== null);
 
-  const last = points.at(-1);
+  // Only use explicitly timestamped post-market quotes.
+  // Intraday chart points can include stale or regular-session values.
   const post = meta.currentTradingPeriod?.post;
   const regularTime = finite(meta.regularMarketTime);
   const postPrice = positive(meta.postMarketPrice);
-
-  let after = null;
-  let afterTime = null;
-
-  if (market === 'US' && post) {
-    const postStart = finite(post.start);
-    const postEnd = finite(post.end);
-    const postMarketTime = finite(meta.postMarketTime);
-
-    if (
-      postPrice !== null &&
-      postMarketTime !== null &&
-      postStart !== null &&
-      postEnd !== null &&
-      postMarketTime >= postStart &&
-      postMarketTime <= postEnd
-    ) {
-      after = postPrice;
-      afterTime = postMarketTime * 1000;
-    } else if (
-      last &&
-      postStart !== null &&
-      postEnd !== null &&
-      last.t / 1000 >= postStart &&
-      last.t / 1000 <= postEnd &&
-      (regularTime === null || last.t / 1000 > regularTime)
-    ) {
-      after = last.v;
-      afterTime = last.t;
-    }
-  }
+  const postMarketTime = finite(meta.postMarketTime);
+  const postStart = finite(post?.start);
+  const postEnd = finite(post?.end);
+  const validPost = market === 'US' &&
+    !symbol.startsWith('^') &&
+    postPrice !== null &&
+    postMarketTime !== null &&
+    postStart !== null &&
+    postEnd !== null &&
+    postMarketTime >= postStart &&
+    postMarketTime <= postEnd &&
+    (regularTime === null || postMarketTime > regularTime);
+  const after = validPost ? postPrice : null;
+  const afterTime = validPost ? postMarketTime * 1000 : null;
 
   const sampled = points.filter((_, index) =>
     index % Math.max(1, Math.floor(points.length / 80)) === 0
@@ -230,8 +211,8 @@ function yahooQuote(result, name, symbol, market) {
     points: sampled,
     status: 'ok',
     source: 'Yahoo Finance Chart API',
-    dataType: 'quote',
-    warning: '非官方行情來源，可能延遲；盤後價格僅供參考'
+    dataType: regularTime && Date.now() - regularTime * 1000 > 4 * 86400000 ? 'stale_quote' : 'quote',
+    warning: '非官方行情來源，可能延遲；請核對交易所與報價日期'
   };
 }
 
@@ -253,7 +234,7 @@ async function quote([name, symbol, market]) {
     return {
       name, symbol, market,
       ...fallback,
-      currency: 'USD',
+      currency: symbol.startsWith('^') ? '' : 'USD',
       status: 'ok'
     };
   } catch (error) {
@@ -349,7 +330,7 @@ app.get('/api/economy', async (req, res) => {
             id,
             series: json.Results?.series?.[0]?.data
               ?.filter(item => /^M\d\d$/.test(item.period))
-              .slice(0, 14) || []
+              .slice(0, 26) || []
           };
         })
       );
@@ -385,6 +366,8 @@ app.get('/api/diagnostics', async (req, res) => {
       source: item.source,
       dataType: item.dataType,
       error: item.error,
+      price: positive(item.price),
+      exchangeTime: item.exchangeTime,
       hasPrice: positive(item.price) !== null
     }))
   });
