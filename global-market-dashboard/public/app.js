@@ -69,6 +69,7 @@ function quoteSource(q) {
   if (!q || !q.source || q.source === 'Unavailable') {
     return '資料來源未提供';
   }
+  if (q.dataType === 'stale_quote') return '舊行情，請核對日期';
   if (q.dataType === 'delayed_daily') {
     return 'Stooq 歷史日線（延遲）';
   }
@@ -92,10 +93,11 @@ function quoteStatus(q, after = false) {
 }
 
 let quotes = [];
-let tab = 'marginListed';
+let tab = 'institutionalListed';
 let quotesLoading = false;
 let economyLoading = false;
 let flowsLoading = false;
+let flowRequestId = 0;
 
 const quoteMap = () =>
   new Map(quotes.map(q => [q.symbol, q]));
@@ -213,7 +215,7 @@ function card(q, after = false) {
     <div class="price">${hasValue ? priceFmt(val) : '—'}</div>
 
     <div class="delta ${cls}">
-      ${hasValue ? pctFmt(delta) : '無可用報價'}
+      ${hasValue ? (delta === null ? '漲跌幅未提供' : pctFmt(delta)) : '無可用報價'}
     </div>
 
     ${chart}
@@ -434,6 +436,65 @@ async function loadEconomy() {
   }
 }
 
+function numericTrade(value) {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).replace(/,/g, '').trim();
+  if (!raw || raw === '--' || raw === '—') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+function rankFromInstitutional(data) {
+  const t = flatten(data);
+  if (!t || !t.fields.length) return null;
+  const fields = t.fields.map(x => String(x).replace(/<[^>]*>/g, '').replace(/\s/g, ''));
+  const code = fields.findIndex(x => /證券代號|股票代號|代號/.test(x));
+  const name = fields.findIndex(x => /證券名稱|股票名稱|名稱/.test(x));
+  const net = fields.findIndex(x => /三大法人買賣超股數|三大法人買賣超|合計買賣超/.test(x));
+  if (code < 0 || name < 0 || net < 0) return null;
+  const rows = t.rows.filter(Array.isArray).map(row => ({
+    code: String(row[code] ?? '').replace(/<[^>]*>/g, '').trim(),
+    name: String(row[name] ?? '').replace(/<[^>]*>/g, '').trim(),
+    net: numericTrade(row[net])
+  })).filter(row => /^\d{4,6}$/.test(row.code) && row.net !== null);
+  if (!rows.length) return null;
+  return {
+    buys: rows.filter(x => x.net > 0).sort((a,b) => b.net-a.net).slice(0,20),
+    sells: rows.filter(x => x.net < 0).sort((a,b) => a.net-b.net).slice(0,20)
+  };
+}
+function rankingTable(items, title) {
+  return `<div><h4>${esc(title)}</h4><table><thead><tr><th>名次</th><th>代號</th><th>名稱</th><th>淨買賣超（股）</th></tr></thead><tbody>` +
+    items.map((r,i) => `<tr><td>${i+1}</td><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td>${fmt(r.net,0)}</td></tr>`).join('') +
+    '</tbody></table></div>';
+}
+function updateRank(targetId, data, source) {
+  const target = $(targetId);
+  if (!target) return;
+  const rank = rankFromInstitutional(data);
+  if (!rank) {
+    target.textContent = '官方資料尚無可辨識的三大法人淨買賣超欄位，暫不產生排行。';
+    return;
+  }
+  target.innerHTML = `<div class="hint">來源：${esc(source)}；依官方淨買賣超股數排序</div>` +
+    rankingTable(rank.buys,'買超前20名') +
+    rankingTable(rank.sells,'賣超前20名');
+}
+async function loadRanks() {
+  await Promise.all([
+    ['institutionalListed','listedRank'],
+    ['institutionalOTC','otcRank']
+  ].map(async ([type,target]) => {
+    try {
+      const d = await fetchJSON('/api/taiwan/'+type,30000);
+      if (d.status !== 'ok') throw Error('來源未提供資料');
+      updateRank(target,d.data,d.source);
+    } catch (e) {
+      const el=$(target);
+      if (el) el.textContent='排行暫無資料：'+e.message;
+    }
+  }));
+}
+
 function flatten(data) {
   if (!data || typeof data !== 'object') return null;
 
@@ -472,7 +533,7 @@ function flatten(data) {
 }
 
 async function loadFlows() {
-  if (flowsLoading) return;
+  const requestId = ++flowRequestId;
   flowsLoading = true;
 
   const chosen = tab;
@@ -488,7 +549,7 @@ async function loadFlows() {
       30000
     );
 
-    if (chosen !== tab) return;
+    if (chosen !== tab || requestId !== flowRequestId) return;
 
     if (response.status !== 'ok') {
       throw Error(response.error || '資料來源未回應');
@@ -544,14 +605,12 @@ async function loadFlows() {
     }
 
   } catch (error) {
-    if (chosen === tab && status) {
+    if (chosen === tab && requestId === flowRequestId && status) {
       status.textContent =
         '目前無法取得官方資料：' + error.message;
     }
   } finally {
-    flowsLoading = false;
-    // If the user changed tabs during loading, fetch the new tab.
-    if (chosen !== tab) loadFlows();
+    if (requestId === flowRequestId) flowsLoading = false;
   }
 }
 
@@ -586,6 +645,7 @@ function initialize() {
       loadQuotes();
       loadEconomy();
       loadFlows();
+      loadRanks();
     };
   }
 
@@ -595,9 +655,11 @@ function initialize() {
   loadQuotes();
   loadEconomy();
   loadFlows();
+  loadRanks();
 
   setInterval(loadQuotes, 60000);
   setInterval(loadFlows, 300000);
+  setInterval(loadRanks, 300000);
   setInterval(loadEconomy, 21600000);
 }
 
